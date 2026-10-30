@@ -1,0 +1,314 @@
+{
+  "name": "Scam and Phishing Message Analyzer",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Scam and Phishing Message Analyzer",
+        "formDescription": "Paste a suspicious message, email text, or link. You will get a risk score with the red flags explained.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Suspicious message or link",
+              "fieldType": "textarea",
+              "placeholder": "Paste the full message or link here",
+              "requiredField": true
+            }
+          ]
+        },
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "9ed2a48c-056c-4409-a2b2-e3624a37eb6e",
+      "name": "Submit Message Form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        112
+      ],
+      "webhookId": "de6c940c-e28a-4b22-9ead-a1c2771b019b"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json['Suspicious message or link'] || '';\nconst text = String(raw);\n\n// 1. URLs (with or without http)\nconst urlRegex = /(?:https?:\\/\\/|www\\.)[^\\s<>\"')]+/gi;\nlet urls = (text.match(urlRegex) || []).map(u => u.replace(/[.,;!?]+$/, ''));\n\n// 2. Bare domains such as amaz0n-careers.in\nif (urls.length === 0) {\n  const bare = /\\b(?:[a-z0-9-]+\\.)+(?:com|in|co|net|org|xyz|top|info|online|site|link|club|biz|shop|app|live|work|click)\\b(?:\\/[^\\s]*)?/gi;\n  urls = (text.match(bare) || []).filter(d => !/@/.test(text.substr(Math.max(0, text.indexOf(d) - 1), 1)));\n}\n\nlet domain = '';\nif (urls.length) {\n  const m = urls[0].replace(/^https?:\\/\\//i, '').match(/^([^\\/?#:\\s]+)/);\n  if (m) domain = m[1].replace(/^www\\./i, '').toLowerCase();\n}\n\nconst shorteners = ['bit.ly','tinyurl.com','t.co','goo.gl','cutt.ly','is.gd','rb.gy','shorturl.at','wa.me','ow.ly'];\nconst isShortener = shorteners.some(s => domain === s);\n\nconst lower = text.toLowerCase();\nconst urgencyWords = ['urgent','immediately','within 24 hours','last chance','act now','expires today','limited slots','hurry','final notice','today only'];\nconst feeWords = ['registration fee','processing fee','security deposit','refundable','joining fee','training fee','kit fee','pay to confirm'];\nconst sensitiveWords = ['otp','pin','password','cvv','aadhaar','aadhar','pan card','bank details','card number','upi pin'];\nconst redirectWords = ['whatsapp','telegram','signal','contact on','dm me','text me'];\n\nconst hits = list => list.filter(w => lower.includes(w));\nconst money = text.match(/(?:₹|rs\\.?|inr|\\$|usd)\\s?\\d[\\d,]*/gi) || [];\nconst phones = text.match(/(?:\\+?91[\\s-]?)?[6-9]\\d{9}/g) || [];\nconst emails = text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/g) || [];\nconst freeProviders = ['gmail.com','yahoo.com','outlook.com','hotmail.com','rediffmail.com','proton.me'];\nconst freeEmails = emails.filter(e => freeProviders.includes(e.split('@')[1].toLowerCase()));\n\nreturn [{\n  json: {\n    message: text,\n    urls,\n    domain,\n    hasDomain: domain !== '',\n    isShortener,\n    urgencyHits: hits(urgencyWords),\n    feeHits: hits(feeWords),\n    sensitiveHits: hits(sensitiveWords),\n    redirectHits: hits(redirectWords),\n    moneyMentions: money,\n    phones,\n    emails,\n    freeEmails\n  }\n}];"
+      },
+      "id": "6a05369a-ecea-4683-b65f-761016058d40",
+      "name": "Extract Features",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c7d1e5f0-1111-4222-8333-444455556666",
+              "leftValue": "={{ $json.hasDomain }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4002792c-5fab-494e-acc9-bf0b04e22dac",
+      "name": "Has Domain?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://rdap.org/domain/{{ $json.domain }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "7e9499d4-adc8-4970-be2b-0a7c8ac6ea78",
+      "name": "Domain Age Lookup (RDAP)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const f = $('Extract Features').first().json;\nconst allEvents = $input.all().flatMap(i => (i.json && Array.isArray(i.json.events)) ? i.json.events : []);\n\n// Domain age from RDAP (if available)\nlet registered = null, ageDays = null;\nif (allEvents.length) {\n  const ev = allEvents.find(e => e.eventAction === 'registration');\n  if (ev && ev.eventDate) {\n    registered = ev.eventDate;\n    ageDays = Math.floor((Date.now() - new Date(ev.eventDate).getTime()) / 86400000);\n  }\n}\n\n// Lookalike brand check\nconst brands = ['amazon','google','microsoft','paypal','flipkart','paytm','phonepe','sbi','hdfc','icici','linkedin','naukri','internshala','tcs','infosys','wipro','accenture','cognizant'];\nconst norm = f.domain.replace(/0/g,'o').replace(/1/g,'l').replace(/3/g,'e').replace(/5/g,'s');\nconst lookalike = brands.filter(b => {\n  if (!norm.includes(b)) return false;\n  const official = [b + '.com', b + '.in', b + '.co.in', b + '.org'];\n  return !official.includes(f.domain) && !official.some(o => f.domain.endsWith('.' + o));\n});\n\nconst lines = [];\nlines.push('MESSAGE:\\n' + f.message);\nlines.push('\\nTECHNICAL EVIDENCE:');\nlines.push('- URLs found: ' + (f.urls.length ? f.urls.join(', ') : 'none'));\nlines.push('- Main domain: ' + (f.domain || 'none'));\nlines.push('- URL shortener used: ' + f.isShortener);\nlines.push('- Domain registered: ' + (registered || 'unknown (lookup failed or no domain)'));\nlines.push('- Domain age in days: ' + (ageDays === null ? 'unknown' : ageDays));\nlines.push('- Lookalike of known brand: ' + (lookalike.length ? lookalike.join(', ') : 'none detected'));\nlines.push('\\nLANGUAGE SIGNALS:');\nlines.push('- Urgency phrases: ' + (f.urgencyHits.join(', ') || 'none'));\nlines.push('- Fee or payment phrases: ' + (f.feeHits.join(', ') || 'none'));\nlines.push('- Asks for sensitive info: ' + (f.sensitiveHits.join(', ') || 'none'));\nlines.push('- Asks to move to another app: ' + (f.redirectHits.join(', ') || 'none'));\nlines.push('- Money amounts: ' + (f.moneyMentions.join(', ') || 'none'));\nlines.push('- Phone numbers: ' + (f.phones.join(', ') || 'none'));\nlines.push('- Email addresses: ' + (f.emails.join(', ') || 'none'));\nlines.push('- Free-provider emails: ' + (f.freeEmails.join(', ') || 'none'));\n\nreturn [{ json: { ...f, domainAgeDays: ageDays, lookalike, evidenceText: lines.join('\\n') } }];"
+      },
+      "id": "def720f8-dbaa-4f55-ac15-4e8e11d7f217",
+      "name": "Build Evidence",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.evidenceText }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a scam and phishing analyst helping students and job seekers.\nYou receive a suspicious message plus technical evidence and language signals that were extracted automatically.\n\nYour job:\n1. Decide how likely the message is to be a scam or phishing attempt.\n2. Weigh technical evidence (very new domain, lookalike brand, URL shortener, free email used by a supposed company) together with language patterns (urgency, fees for jobs or internships, requests for OTP or bank details, moving the chat to another app, unrealistic offers, poor grammar from a supposed official sender).\n3. Never claim certainty. If evidence is missing (for example the domain lookup failed), say so in the red flags or safe signals.\n4. Only list red flags that are actually supported by the message or the evidence. Do not invent facts.\n\nScoring guide:\n- 0 to 39: Low risk\n- 40 to 69: Medium risk\n- 70 to 100: High risk\n\nWrite red flags and advice in simple, short sentences a student can act on. Respond only in the required structured format."
+        }
+      },
+      "id": "93c90ed1-e506-41db-94d1-74ae56ad2fee",
+      "name": "Scam Analyst Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        1200,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-3.1-flash-lite",
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "0601a376-c898-44b5-9bd3-76d8830eec19",
+      "name": "Google Gemini Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        1152,
+        352
+      ],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "ECtGnZ8Zw0JJKv8j",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"risk_score\": {\n      \"type\": \"integer\",\n      \"minimum\": 0,\n      \"maximum\": 100\n    },\n    \"verdict\": {\n      \"type\": \"string\",\n      \"enum\": [\n        \"Low risk\",\n        \"Medium risk\",\n        \"High risk\"\n      ]\n    },\n    \"scam_type\": {\n      \"type\": \"string\"\n    },\n    \"red_flags\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"string\"\n      }\n    },\n    \"safe_signals\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"string\"\n      }\n    },\n    \"what_to_do\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"string\"\n      }\n    }\n  },\n  \"required\": [\n    \"risk_score\",\n    \"verdict\",\n    \"scam_type\",\n    \"red_flags\",\n    \"safe_signals\",\n    \"what_to_do\"\n  ]\n}"
+      },
+      "id": "4281b7c2-424f-4c55-88e6-af2b9063e98f",
+      "name": "Structured Output Parser",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.2,
+      "position": [
+        1344,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const o = $json.output || {};\nconst esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\nconst list = arr => (Array.isArray(arr) && arr.length)\n  ? '<ul>' + arr.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>'\n  : '<p>None found</p>';\n\nconst score = Number(o.risk_score ?? 0);\nconst color = score >= 70 ? '#c0392b' : score >= 40 ? '#e67e22' : '#27ae60';\n\nconst html =\n  '<div style=\"font-family:sans-serif\">' +\n  '<h2 style=\"color:' + color + '\">' + esc(o.verdict) + ' (' + score + '/100)</h2>' +\n  '<p><b>Likely type:</b> ' + esc(o.scam_type) + '</p>' +\n  '<h3>Red flags</h3>' + list(o.red_flags) +\n  '<h3>Reassuring signals</h3>' + list(o.safe_signals) +\n  '<h3>What to do</h3>' + list(o.what_to_do) +\n  '<p style=\"font-size:12px;color:#777\">This is an automated estimate, not a guarantee. Always verify through the official website or a trusted person.</p>' +\n  '</div>';\n\nreturn [{ json: { html } }];"
+      },
+      "id": "d57ee7c0-3665-4de6-972e-e82fa1f084e1",
+      "name": "Format Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "Scan result",
+        "completionMessage": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "7cd8d0df-eda4-4d60-b736-0d2737f4ea00",
+      "name": "Show Result",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 1,
+      "position": [
+        1808,
+        112
+      ],
+      "webhookId": "6ccf06ee-bb44-4113-bbb5-58a6fe17b115"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Submit Message Form": {
+      "main": [
+        [
+          {
+            "node": "Extract Features",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Features": {
+      "main": [
+        [
+          {
+            "node": "Has Domain?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Domain?": {
+      "main": [
+        [
+          {
+            "node": "Domain Age Lookup (RDAP)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Evidence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Domain Age Lookup (RDAP)": {
+      "main": [
+        [
+          {
+            "node": "Build Evidence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Evidence": {
+      "main": [
+        [
+          {
+            "node": "Scam Analyst Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scam Analyst Agent": {
+      "main": [
+        [
+          {
+            "node": "Format Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Scam Analyst Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Scam Analyst Agent",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Result": {
+      "main": [
+        [
+          {
+            "node": "Show Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "0e4a3d55-94e7-429f-a082-8b9418437e4b",
+  "meta": {
+    "instanceId": "2ffd00a14bc726b63c95652c1d071791db27adc9be44548c1b9a005b711a49f1"
+  },
+  "nodeGroups": [],
+  "id": "vRawkfHtn7ny905n",
+  "tags": []
+}
